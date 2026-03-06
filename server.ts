@@ -47,10 +47,18 @@ async function startServer() {
   });
 
   app.post("/api/reset", (req, res) => {
-    db.prepare("UPDATE queue_state SET current_number = 0").run();
-    db.prepare("DELETE FROM call_history").run();
-    io.emit("state_updated", { state: [{ type: 'UMUM', current_number: 0 }, { type: 'BPJS', current_number: 0 }], lastCall: null });
-    res.json({ success: true });
+    console.log("Resetting all queues...");
+    try {
+      db.prepare("UPDATE queue_state SET current_number = 0").run();
+      db.prepare("DELETE FROM call_history").run();
+      const state = db.prepare("SELECT * FROM queue_state").all();
+      console.log("New state after reset:", state);
+      io.emit("state_updated", { state, lastCall: null });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Reset error in server:", error);
+      res.status(500).json({ error: "Failed to reset" });
+    }
   });
 
   // WebSocket Logic

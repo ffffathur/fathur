@@ -4,7 +4,8 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { io, Socket } from 'socket.io-client';
+import io from 'socket.io-client';
+import type { Socket } from 'socket.io-client';
 import { 
   Users, 
   UserCheck, 
@@ -51,22 +52,20 @@ export default function App() {
   const [queueState, setQueueState] = useState<QueueState[]>([]);
   const [lastCall, setLastCall] = useState<LastCall | null>(null);
   const [isCalling, setIsCalling] = useState(false);
-  const socketRef = useRef<Socket | null>(null);
+  const socketRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
-    socketRef.current = io();
+    const socket = io();
+    socketRef.current = socket;
 
-    socketRef.current.on('state_updated', (data: { state: QueueState[], lastCall: LastCall | null }) => {
+    socket.on('state_updated', (data: { state: QueueState[], lastCall: LastCall | null }) => {
       setQueueState(data.state);
       setLastCall(data.lastCall);
     });
 
-    socketRef.current.on('new_call', (data: LastCall) => {
+    socket.on('new_call', (data: LastCall) => {
       setLastCall(data);
-      if (view === 'display') {
-        speakCall(data);
-      }
     });
 
     // Initial fetch
@@ -78,9 +77,16 @@ export default function App() {
       });
 
     return () => {
-      socketRef.current?.disconnect();
+      socket.disconnect();
     };
-  }, [view]);
+  }, []); // Run only once
+
+  // Separate effect for speech to react to lastCall changes when in display view
+  useEffect(() => {
+    if (view === 'display' && lastCall) {
+      speakCall(lastCall);
+    }
+  }, [lastCall, view]);
 
   const speakCall = async (call: LastCall) => {
     if (isCalling) return;
@@ -106,13 +112,38 @@ export default function App() {
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
-        const audioData = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0)).buffer;
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        // Convert base64 to binary
+        const binaryString = atob(base64Audio);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
         }
-        const buffer = await audioContextRef.current.decodeAudioData(audioData);
+
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({
+            sampleRate: 24000
+          });
+        }
+
+        // Resume context if suspended (browser security policy)
+        if (audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+
+        // Gemini TTS returns raw PCM 16-bit Little Endian, Mono, 24000Hz
+        // We convert it to Float32 for AudioBuffer
+        const pcmData = new Int16Array(bytes.buffer);
+        const audioBuffer = audioContextRef.current.createBuffer(1, pcmData.length, 24000);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        for (let i = 0; i < pcmData.length; i++) {
+          // Convert 16-bit signed integer to float (-1.0 to 1.0)
+          channelData[i] = pcmData[i] / 32768.0;
+        }
+
         const source = audioContextRef.current.createBufferSource();
-        source.buffer = buffer;
+        source.buffer = audioBuffer;
         source.connect(audioContextRef.current.destination);
         source.onended = () => setIsCalling(false);
         source.start();
@@ -135,9 +166,21 @@ export default function App() {
     }
   };
 
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
   const handleReset = async () => {
-    if (confirm('Apakah Anda yakin ingin mereset semua antrian?')) {
-      await fetch('/api/reset', { method: 'POST' });
+    try {
+      const response = await fetch('/api/reset', { method: 'POST' });
+      if (response.ok) {
+        setQueueState([
+          { type: 'UMUM', current_number: 0 },
+          { type: 'BPJS', current_number: 0 }
+        ]);
+        setLastCall(null);
+        setShowResetConfirm(false);
+      }
+    } catch (error) {
+      console.error("Reset error:", error);
     }
   };
 
@@ -194,13 +237,32 @@ export default function App() {
           </div>
 
           <div className="mt-12 pt-8 border-t border-zinc-100 flex justify-between items-center">
-            <button 
-              onClick={handleReset}
-              className="flex items-center gap-2 text-zinc-400 hover:text-red-500 transition-colors text-sm font-medium"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Reset Semua Antrian
-            </button>
+            <div className="relative">
+              {showResetConfirm ? (
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={handleReset}
+                    className="flex-1 py-2 bg-red-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider"
+                  >
+                    Ya, Reset
+                  </button>
+                  <button 
+                    onClick={() => setShowResetConfirm(false)}
+                    className="flex-1 py-2 bg-zinc-100 text-zinc-500 rounded-xl text-xs font-bold uppercase tracking-wider"
+                  >
+                    Batal
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => setShowResetConfirm(true)}
+                  className="flex items-center gap-2 text-zinc-400 hover:text-red-500 transition-colors text-sm font-medium"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Reset Semua Antrian
+                </button>
+              )}
+            </div>
             <p className="text-zinc-400 text-xs font-mono">v1.0.0 • Hospital Queue System</p>
           </div>
         </motion.div>
@@ -225,8 +287,12 @@ export default function App() {
               <p className="text-zinc-500 text-xs font-mono uppercase tracking-widest">Waktu Lokal</p>
               <ClockDisplay />
             </div>
-            <button onClick={() => setView('selection')} className="p-2 hover:bg-white/5 rounded-full transition-colors">
-              <RotateCcw className="w-5 h-5 text-zinc-500" />
+            <button 
+              onClick={() => setView('selection')} 
+              className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors text-zinc-400 hover:text-white"
+            >
+              <ChevronRight className="w-4 h-4 rotate-180" />
+              <span className="text-xs font-medium uppercase tracking-widest">Kembali</span>
             </button>
           </div>
         </div>
