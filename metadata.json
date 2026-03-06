@@ -1,5 +1,5 @@
 {
-  "name": "Hospital Queue System",
+  "name": "Antrian RSUD",
   "description": "A real-time hospital queue calling system with 8 counters for General and BPJS patients.",
   "requestFramePermissions": []
 }
